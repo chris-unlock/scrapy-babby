@@ -5,7 +5,8 @@ A secure, local-only Manifest V3 Chrome Extension to manually capture reading ma
 ## Installation (Unpacked)
 1. Open Chrome and navigate to `chrome://extensions/`.
 2. Enable **Developer mode** in the top right.
-3. Click **Load unpacked** and select the `/extension/` folder in this repository.
+3. Click **Load unpacked** and select the `/extension/` folder in this repository. 
+   *(Note: The folder name doesn't matter for the extension's name in Chrome, as Chrome reads the name "scrapy babby" directly from the `manifest.json`. You can leave the folder named `extension`!)*
 
 ## Usage
 - **Single Page Capture**: Click the extension icon and select "Capture Page", or hit `Ctrl+Shift+S`.
