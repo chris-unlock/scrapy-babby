@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+  <meta charset="utf-8">
+  <link rel="stylesheet" href="popup.css">
+</head>
+
+<body>
+  <h3>scrapy babby</h3>
+
+  <div class="actions">
+    <button id="btn-capture-text">Capture Page (Text+Meta)</button>
+    <button id="btn-capture-images">Capture Page + Images</button>
+    <button id="btn-capture-screen">Full-page Screenshot</button>
+    <button id="btn-add-queue">Add Page to Queue</button>
+  </div>
+
+  <div class="queue-section">
+    <h4>Queue</h4>
+    <div class="toggles">
+      <label><input type="checkbox" id="toggle-same-origin" checked> Same-origin only</label>
+      <br>
+      <label><input type="checkbox" id="toggle-linkedin-safe" checked> LinkedIn Safe Mode</label>
+      <p id="linkedin-warning" class="warning" style="display:none;">LinkedIn mode enforces manual captures only to
+        prevent ToS risk.</p>
+    </div>
+    <div class="queue-actions">
+      <button id="btn-run-queue">Run Queue (<span id="queue-count">0</span>)</button>
+      <button id="btn-cancel-queue" disabled>Cancel</button>
+    </div>
+    <div id="status-msg" class="status"></div>
+  </div>
+
+  <script type="module" src="popup.js"></script>
+</body>
+
+</html>

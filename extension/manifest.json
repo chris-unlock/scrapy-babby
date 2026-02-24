@@ -1,0 +1,33 @@
+{
+  "manifest_version": 3,
+  "name": "scrapy babby",
+  "version": "1.0",
+  "description": "Manually capture web pages and save content-focused snapshots strictly to local Downloads.",
+  "permissions": [
+    "tabs",
+    "activeTab",
+    "scripting",
+    "storage",
+    "downloads",
+    "contextMenus"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "action": {
+    "default_popup": "popup.html"
+  },
+  "commands": {
+    "capture_page": {
+      "suggested_key": {
+        "default": "Ctrl+Shift+S",
+        "mac": "Command+Shift+S"
+      },
+      "description": "Capture current page content"
+    }
+  }
+}
