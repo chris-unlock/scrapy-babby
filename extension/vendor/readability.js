@@ -2810,3 +2810,4 @@ if (typeof module === "object") {
   /* global module */
   module.exports = Readability;
 }
+window.Readability = Readability;

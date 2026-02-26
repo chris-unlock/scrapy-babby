@@ -161,7 +161,7 @@ async function extractAndDownload(tab, includeImages) {
     await new Promise(r => setTimeout(r, 2000));
 
     try {
-        const response = await chrome.tabs.sendMessage(tab.id, { type: 'EXTRACT', url: tab.url });
+        const response = await chrome.tabs.sendMessage(tab.id, { type: 'EXTRACT', url: tab.url, includeImages: includeImages });
         if (!response) return;
 
         const capturedAt = new Date().toISOString();
@@ -188,12 +188,14 @@ async function extractAndDownload(tab, includeImages) {
 
         const mdContent = frontmatter + response.markdown;
 
-        // Download Markdown
-        chrome.downloads.download({
-            url: dataToDataUrl(mdContent, 'text/markdown'),
-            filename: `${folderPath}/content.md`,
-            conflictAction: 'overwrite'
-        });
+        // Download Markdown (only when not in image mode — image mode re-downloads after path rewriting)
+        if (!includeImages) {
+            chrome.downloads.download({
+                url: dataToDataUrl(mdContent, 'text/markdown'),
+                filename: `${folderPath}/content.md`,
+                conflictAction: 'overwrite'
+            });
+        }
 
         // Download Text fallback
         chrome.downloads.download({
@@ -216,12 +218,51 @@ async function extractAndDownload(tab, includeImages) {
             conflictAction: 'overwrite'
         });
 
-        // Optional Images processing (simulated to save state)
+        // Optional Images processing
         if (includeImages && response.images.length > 0) {
-            const imgJson = { total: response.images.length, urls: response.images };
+            let updatedMarkdown = response.markdown;
+            const imageManifest = [];
+            let imgCount = 1;
+
+            for (const imgObj of response.images) {
+                try {
+                    const urlObj = new URL(imgObj.src);
+                    const extMatch = urlObj.pathname.match(/\.(png|jpe?g|gif|webp|svg|avif)$/i);
+                    const ext = extMatch ? extMatch[1].toLowerCase() : 'jpg';
+                    const altSlug = imgObj.alt
+                        ? slugify(imgObj.alt).substring(0, 40)
+                        : slugify(urlObj.pathname.split('/').pop().replace(/\.[^.]+$/, '') || 'img').substring(0, 40);
+                    const safeName = imgCount.toString().padStart(3, '0') + '-' + (altSlug || 'img') + '.' + ext;
+
+                    chrome.downloads.download({
+                        url: imgObj.src,
+                        filename: `${folderPath}/images/${safeName}`,
+                        conflictAction: 'overwrite'
+                    });
+
+                    // Rewrite markdown reference to local path
+                    const escapedUrl = imgObj.src.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+                    updatedMarkdown = updatedMarkdown.replace(
+                        new RegExp(`!\\[([^\\]]*)\\]\\(${escapedUrl}\\)`, 'g'),
+                        `![$1](./images/${safeName})`
+                    );
+
+                    imageManifest.push({ localPath: safeName, src: imgObj.src, alt: imgObj.alt, width: imgObj.width, height: imgObj.height });
+                    imgCount++;
+                } catch (e) { /* skip malformed URL */ }
+            }
+
+            // Download content.md with local image paths
             chrome.downloads.download({
-                url: dataToDataUrl(JSON.stringify(imgJson, null, 2), 'application/json'),
-                filename: `${folderPath}/images/images.json`,
+                url: dataToDataUrl(frontmatter + updatedMarkdown, 'text/markdown'),
+                filename: `${folderPath}/content.md`,
+                conflictAction: 'overwrite'
+            });
+
+            // Download image manifest
+            chrome.downloads.download({
+                url: dataToDataUrl(JSON.stringify(imageManifest, null, 2), 'application/json'),
+                filename: `${folderPath}/images/manifest.json`,
                 conflictAction: 'overwrite'
             });
         }

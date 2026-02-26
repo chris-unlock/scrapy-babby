@@ -974,3 +974,4 @@ var TurndownService = (function () {
   return TurndownService;
 
 }());
+window.TurndownService = TurndownService;
