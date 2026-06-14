@@ -38,7 +38,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         });
     } else if (request.type === 'CAPTURE_SCREENSHOT') {
         chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
-            if (tabs[0]) captureScreenshot(tabs[0]);
+            if (tabs[0]) captureFullPageScreenshot(tabs[0]);
         });
     } else if (request.type === 'ENQUEUE_URL') {
         enqueueUrl(request.url);
@@ -130,6 +130,35 @@ async function captureScreenshot(tab) {
         filename: `${folderPath}/screenshot-viewport.png`,
         conflictAction: 'overwrite'
     });
+}
+
+async function captureFullPageScreenshot(tab) {
+    const target = { tabId: tab.id };
+
+    try {
+        await chrome.debugger.attach(target, '1.3');
+        const result = await chrome.debugger.sendCommand(target, 'Page.captureScreenshot', {
+            format: 'png',
+            captureBeyondViewport: true
+        });
+        await chrome.debugger.detach(target);
+
+        const capturedAt = new Date().toISOString();
+        const hashData = await shortHash(tab.url + capturedAt);
+        const slug = slugify(tab.title || 'screenshot');
+        const ymd = capturedAt.split('T')[0];
+        const host = getHostname(tab.url);
+        const folderPath = `scrapy-babby/${host}/${ymd}/${slug}-${hashData}`;
+
+        chrome.downloads.download({
+            url: 'data:image/png;base64,' + result.data,
+            filename: `${folderPath}/screenshot-fullpage.png`,
+            conflictAction: 'overwrite'
+        });
+    } catch (e) {
+        console.error('Full-page capture failed:', e);
+        await chrome.debugger.detach(target).catch(() => {});
+    }
 }
 
 function blobToBase64(blob) {
