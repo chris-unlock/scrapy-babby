@@ -47,8 +47,32 @@ function extractMeta() {
     return meta;
 }
 
-function buildCleanDom() {
-    const clone = document.body.cloneNode(true);
+// Scope 'main': prefer the page's own main-content landmark; fall back to Readability's
+// article extraction; fall back to the full body. Scope 'full': always the body.
+// Returns { root, live } — live=false means root is a detached container, not on-page DOM.
+function resolveExtractionRoot(scope) {
+    if (scope === 'main') {
+        const main = document.querySelector('main, [role="main"]');
+        if (main) return { root: main, live: true };
+
+        if (typeof window.Readability !== 'undefined') {
+            try {
+                const article = new window.Readability(document.cloneNode(true)).parse();
+                if (article && article.content) {
+                    const container = document.createElement('div');
+                    container.innerHTML = article.content;
+                    return { root: container, live: false };
+                }
+            } catch (e) {
+                console.log('Readability main-content extraction failed', e);
+            }
+        }
+    }
+    return { root: document.body, live: true };
+}
+
+function buildCleanDom(rootEl) {
+    const clone = rootEl.cloneNode(true);
 
     // Remove hidden elements
     clone.querySelectorAll('*').forEach(el => {
@@ -79,14 +103,15 @@ function buildCleanDom() {
     return clone;
 }
 
-function collectImages(includeImages) {
+// rootEl must be live (on-page) DOM: size filtering relies on layout via getBoundingClientRect.
+function collectImages(includeImages, rootEl = document) {
     if (!includeImages) return [];
 
     const PLACEHOLDER_RE = /placeholder|blank|spacer|pixel|1x1|loading/i;
     const seen = new Set();
     const results = [];
 
-    document.querySelectorAll('img').forEach(img => {
+    rootEl.querySelectorAll('img').forEach(img => {
         let src = '';
 
         if (img.currentSrc && !img.currentSrc.startsWith('data:') && !PLACEHOLDER_RE.test(img.currentSrc)) {
@@ -197,7 +222,7 @@ function cleanMarkdown(raw) {
 }
 
 function isLinkedInProfile() {
-    return /linkedin\.com\/in\//i.test(window.location.href);
+    return /linkedin\.com\/(in|company)\//i.test(window.location.href);
 }
 
 function wait(ms) {
@@ -257,11 +282,23 @@ function extractLinkedInProfile() {
     }
 
     // Profile sections
+    let foundSections = false;
     for (const id of LI_SECTION_IDS) {
         const wrapper = document.getElementById(id);
         if (!wrapper) continue;
 
-        const contentEl = wrapper.querySelector('section') || wrapper;
+        let contentEl = wrapper;
+        if (wrapper.tagName !== 'SECTION') {
+            const parentSection = wrapper.closest('section');
+            if (parentSection) {
+                contentEl = parentSection;
+            } else {
+                contentEl = wrapper.parentElement || wrapper;
+            }
+        } else {
+            contentEl = wrapper.querySelector('section') || wrapper;
+        }
+
         const clone = contentEl.cloneNode(true);
 
         clone.querySelectorAll('button').forEach(el => el.remove());
@@ -282,6 +319,26 @@ function extractLinkedInProfile() {
 
         if (bodyText) {
             parts.push(`## ${heading}\n\n${bodyText}`);
+            foundSections = true;
+        }
+    }
+
+    // Fallback for Company pages or completely changed profile layouts
+    if (!foundSections) {
+        const main = document.querySelector('main');
+        if (main) {
+            const clone = main.cloneNode(true);
+            clone.querySelectorAll('button').forEach(el => el.remove());
+            clone.querySelectorAll('nav').forEach(el => el.remove());
+            // don't duplicate top card if already grabbed
+            if (h1) {
+                const topSectionInMain = clone.querySelector('h1')?.closest('section');
+                if (topSectionInMain) topSectionInMain.remove();
+            }
+            const mainText = cleanLinkedInText(clone.innerText.trim());
+            if (mainText) {
+                parts.push(mainText);
+            }
         }
     }
 
@@ -292,12 +349,22 @@ function extractLinkedInProfile() {
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     if (request.type === 'EXTRACT') {
         (async () => {
+            // mode: 'text-images' | 'text' | 'images'; scope: 'main' | 'full'
+            const mode = request.mode || 'text';
+            const scope = request.scope || 'full';
             const meta = extractMeta();
-            const imageObjects = collectImages(request.includeImages || false);
 
             let markdown = '', text = '', links = [];
+            // Live root for image collection; narrowed below when a main landmark exists.
+            let imageRoot = document;
 
-            if (isLinkedInProfile()) {
+            if (mode === 'images') {
+                // Images-only: skip Readability/Turndown work entirely.
+                if (scope === 'main') {
+                    const main = document.querySelector('main, [role="main"]');
+                    if (main) imageRoot = main;
+                }
+            } else if (isLinkedInProfile()) {
                 // Clean notification badge from title e.g. "(24) Chad Goodwin | LinkedIn"
                 meta.title = meta.title.replace(/^\(\d+\)\s*/, '');
 
@@ -320,8 +387,10 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
                 )];
 
             } else {
-                // Generic path — unchanged
-                const cleanedBody = buildCleanDom();
+                // Generic path
+                const { root, live } = resolveExtractionRoot(scope);
+                if (live && root !== document.body) imageRoot = root;
+                const cleanedBody = buildCleanDom(root);
                 const td = configureTurndown();
                 try {
                     markdown = cleanMarkdown(td.turndown(cleanedBody));
@@ -338,6 +407,9 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
                         .filter(Boolean)
                 )];
             }
+
+            // Collect images after extraction so LinkedIn's lazy-load scrolling has already run.
+            const imageObjects = collectImages(mode !== 'text', imageRoot);
 
             meta.word_count = text.split(/\s+/).filter(Boolean).length;
             meta.excerpt = meta.excerpt || text.substring(0, 200).replace(/\n/g, ' ').trim();

@@ -1,7 +1,6 @@
-import { slugify } from './utils/slug.js';
-import { shortHash } from './utils/hash.js';
-import { getHostname, isLinkedIn } from './utils/urls.js';
-import { getQueue, saveQueue } from './utils/storage.js';
+import { slugify, urlToSlug } from './utils/slug.js';
+import { getHostname, isLinkedIn, QUEUE_LIMIT } from './utils/urls.js';
+import { getQueue, saveQueue, getScope } from './utils/storage.js';
 
 let isQueueRunning = false;
 let cancelRequested = false;
@@ -24,8 +23,8 @@ chrome.contextMenus.onClicked.addListener((info, tab) => {
 // Keyboard command
 chrome.commands.onCommand.addListener((command) => {
     if (command === "capture_page") {
-        chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
-            if (tabs[0]) extractAndDownload(tabs[0], false);
+        chrome.tabs.query({ active: true, currentWindow: true }, async (tabs) => {
+            if (tabs[0]) extractAndDownload(tabs[0], 'text', await getScope());
         });
     }
 });
@@ -34,11 +33,7 @@ chrome.commands.onCommand.addListener((command) => {
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     if (request.type === 'PROCESS_CURRENT_TAB') {
         chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
-            if (tabs[0]) extractAndDownload(tabs[0], request.includeImages);
-        });
-    } else if (request.type === 'CAPTURE_SCREENSHOT') {
-        chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
-            if (tabs[0]) captureFullPageScreenshot(tabs[0]);
+            if (tabs[0]) extractAndDownload(tabs[0], request.mode || 'text', request.scope);
         });
     } else if (request.type === 'ENQUEUE_URL') {
         enqueueUrl(request.url);
@@ -51,25 +46,43 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
 
 async function enqueueUrl(url) {
     const queue = await getQueue();
-    if (queue.length < 10 && !queue.includes(url)) {
+    if (queue.length < QUEUE_LIMIT && !queue.includes(url)) {
         queue.push(url);
         await saveQueue(queue);
     }
 }
 
-async function runQueue(options) {
+// Jittered politeness delay: exact fixed intervals look robotic. Longer runs pace slower.
+function queueDelayMs(totalPagesAtStart) {
+    return totalPagesAtStart > 20
+        ? 4000 + Math.random() * 3000   // 4–7s
+        : 2500 + Math.random() * 2000;  // 2.5–4.5s
+}
+
+function setBadge(remaining) {
+    chrome.action.setBadgeBackgroundColor({ color: '#0066cc' }).catch(() => { });
+    chrome.action.setBadgeText({ text: remaining > 0 ? String(remaining) : '' }).catch(() => { });
+}
+
+async function runQueue(options = {}) {
     if (isQueueRunning) return;
     isQueueRunning = true;
     cancelRequested = false;
 
+    const mode = options.mode || 'text-images';
+    const scope = options.scope;
     let queue = await getQueue();
+    const totalAtStart = queue.length;
 
     while (queue.length > 0 && !cancelRequested) {
         const targetUrl = queue[0];
+        setBadge(queue.length);
 
+        // Backstop: intake filtering should have caught these already.
         if (options.linkedInSafe && isLinkedIn(targetUrl)) {
             broadcastStatus(`Skipped LinkedIn URL in queue (Safe Mode)`);
             queue.shift();
+            await saveQueue(queue);
             continue;
         }
 
@@ -89,7 +102,7 @@ async function runQueue(options) {
         });
 
         if (!cancelRequested) {
-            await extractAndDownload(tab, false);
+            await extractAndDownload(tab, mode, scope);
         }
 
         // Cleanup
@@ -98,11 +111,12 @@ async function runQueue(options) {
         await saveQueue(queue);
 
         if (queue.length > 0 && !cancelRequested) {
-            await new Promise(r => setTimeout(r, 1500)); // Delay between pages
+            await new Promise(r => setTimeout(r, queueDelayMs(totalAtStart)));
         }
     }
 
     isQueueRunning = false;
+    setBadge(0);
     broadcastStatus(cancelRequested ? "Queue cancelled" : "Queue finished");
 }
 
@@ -110,71 +124,12 @@ function broadcastStatus(text) {
     chrome.runtime.sendMessage({ type: 'QUEUE_STATUS_UPDATE', text }).catch(() => { });
 }
 
-async function captureScreenshot(tab) {
-    // A simplified, safe viewport capture fallback is implemented as requested to prioritize reliability over complex stitching
-    const dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, { format: 'png' });
-    const response = await fetch(dataUrl);
-    const blob = await response.blob();
-    const base64Str = await blobToBase64(blob);
-
-    const capturedAt = new Date().toISOString();
-    const hashData = await shortHash(tab.url + capturedAt);
-    const slug = slugify(tab.title || "screenshot");
-    const ymd = capturedAt.split('T')[0];
-    const host = getHostname(tab.url);
-
-    const folderPath = `scrapy-babby/${host}/${ymd}/${slug}-${hashData}`;
-
-    chrome.downloads.download({
-        url: 'data:image/png;base64,' + base64Str,
-        filename: `${folderPath}/screenshot-viewport.png`,
-        conflictAction: 'overwrite'
-    });
-}
-
-async function captureFullPageScreenshot(tab) {
-    const target = { tabId: tab.id };
-
-    try {
-        await chrome.debugger.attach(target, '1.3');
-        const result = await chrome.debugger.sendCommand(target, 'Page.captureScreenshot', {
-            format: 'png',
-            captureBeyondViewport: true
-        });
-        await chrome.debugger.detach(target);
-
-        const capturedAt = new Date().toISOString();
-        const hashData = await shortHash(tab.url + capturedAt);
-        const slug = slugify(tab.title || 'screenshot');
-        const ymd = capturedAt.split('T')[0];
-        const host = getHostname(tab.url);
-        const folderPath = `scrapy-babby/${host}/${ymd}/${slug}-${hashData}`;
-
-        chrome.downloads.download({
-            url: 'data:image/png;base64,' + result.data,
-            filename: `${folderPath}/screenshot-fullpage.png`,
-            conflictAction: 'overwrite'
-        });
-    } catch (e) {
-        console.error('Full-page capture failed:', e);
-        await chrome.debugger.detach(target).catch(() => {});
-    }
-}
-
-function blobToBase64(blob) {
-    return new Promise((resolve) => {
-        const reader = new FileReader();
-        reader.onloadend = () => resolve(reader.result.split(',')[1]);
-        reader.readAsDataURL(blob);
-    });
-}
-
 function dataToDataUrl(data, mime) {
     const encoded = encodeURIComponent(data);
     return `data:${mime};charset=utf-8,${encoded}`;
 }
 
-async function extractAndDownload(tab, includeImages) {
+async function extractAndDownload(tab, mode, scope = 'main') {
     // Inject scripts
     try {
         await chrome.scripting.executeScript({
@@ -189,17 +144,28 @@ async function extractAndDownload(tab, includeImages) {
     // Wait 2s for SPAs
     await new Promise(r => setTimeout(r, 2000));
 
+    const wantText = mode !== 'images';
+    const wantImages = mode !== 'text';
+
     try {
-        const response = await chrome.tabs.sendMessage(tab.id, { type: 'EXTRACT', url: tab.url, includeImages: includeImages });
+        const response = await chrome.tabs.sendMessage(tab.id, { type: 'EXTRACT', mode, scope });
         if (!response) return;
 
         const capturedAt = new Date().toISOString();
-        const hashData = await shortHash(tab.url + capturedAt);
-        const slug = slugify(response.meta.title);
         const ymd = capturedAt.split('T')[0];
-        const host = getHostname(tab.url);
 
-        const folderPath = `scrapy-babby/${host}/${ymd}/${slug}-${hashData}`;
+        // Name folders from the URL the content script reports (window.location.href).
+        // Queue tabs are created from a pre-navigation snapshot whose tab.url is still
+        // empty, so trusting tab.url sent every queued page to unknown-host/home.
+        const pageUrl = response.meta.source_url || tab.url || tab.pendingUrl || '';
+        const host = getHostname(pageUrl);
+
+        // Folder named from the URL path; same-day re-captures of a page intentionally overwrite.
+        const folderPath = `scrapy-babby/${host}/${ymd}/${urlToSlug(pageUrl)}`;
+
+        // Record how this capture was made (useful to agents consuming meta.json).
+        response.meta.capture_mode = mode;
+        response.meta.capture_scope = scope;
 
         // Construct Markdown with Frontmatter
         const frontmatter = `---\n` +
@@ -215,40 +181,40 @@ async function extractAndDownload(tab, includeImages) {
             `excerpt: "${response.meta.excerpt.replace(/"/g, '\\"')}"\n` +
             `---\n\n`;
 
-        const mdContent = frontmatter + response.markdown;
+        if (wantText) {
+            // Download Markdown (image mode re-downloads after path rewriting)
+            if (!wantImages) {
+                chrome.downloads.download({
+                    url: dataToDataUrl(frontmatter + response.markdown, 'text/markdown'),
+                    filename: `${folderPath}/content.md`,
+                    conflictAction: 'overwrite'
+                });
+            }
 
-        // Download Markdown (only when not in image mode — image mode re-downloads after path rewriting)
-        if (!includeImages) {
+            // Download Text fallback
             chrome.downloads.download({
-                url: dataToDataUrl(mdContent, 'text/markdown'),
-                filename: `${folderPath}/content.md`,
+                url: dataToDataUrl(response.text, 'text/plain'),
+                filename: `${folderPath}/content.txt`,
+                conflictAction: 'overwrite'
+            });
+
+            // Download Links
+            chrome.downloads.download({
+                url: dataToDataUrl(JSON.stringify(response.links, null, 2), 'application/json'),
+                filename: `${folderPath}/links.json`,
                 conflictAction: 'overwrite'
             });
         }
 
-        // Download Text fallback
-        chrome.downloads.download({
-            url: dataToDataUrl(response.text, 'text/plain'),
-            filename: `${folderPath}/content.txt`,
-            conflictAction: 'overwrite'
-        });
-
-        // Download Meta
+        // Meta is saved in every mode — it gives agents the source URL + capture date.
         chrome.downloads.download({
             url: dataToDataUrl(JSON.stringify(response.meta, null, 2), 'application/json'),
             filename: `${folderPath}/meta.json`,
             conflictAction: 'overwrite'
         });
 
-        // Download Links
-        chrome.downloads.download({
-            url: dataToDataUrl(JSON.stringify(response.links, null, 2), 'application/json'),
-            filename: `${folderPath}/links.json`,
-            conflictAction: 'overwrite'
-        });
-
         // Optional Images processing
-        if (includeImages && response.images.length > 0) {
+        if (wantImages && response.images.length > 0) {
             let updatedMarkdown = response.markdown;
             const imageManifest = [];
             let imgCount = 1;
@@ -282,11 +248,13 @@ async function extractAndDownload(tab, includeImages) {
             }
 
             // Download content.md with local image paths
-            chrome.downloads.download({
-                url: dataToDataUrl(frontmatter + updatedMarkdown, 'text/markdown'),
-                filename: `${folderPath}/content.md`,
-                conflictAction: 'overwrite'
-            });
+            if (wantText) {
+                chrome.downloads.download({
+                    url: dataToDataUrl(frontmatter + updatedMarkdown, 'text/markdown'),
+                    filename: `${folderPath}/content.md`,
+                    conflictAction: 'overwrite'
+                });
+            }
 
             // Download image manifest
             chrome.downloads.download({

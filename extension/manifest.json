@@ -9,8 +9,7 @@
     "scripting",
     "storage",
     "downloads",
-    "contextMenus",
-    "debugger"
+    "contextMenus"
   ],
   "host_permissions": [
     "<all_urls>"
